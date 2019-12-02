@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+
+STAGE=$1
+SERVICE_NAME=$2
+SERVICE_DIR=$3
+PATH=${PWD}/bin:$PATH
+
+set -e
+
+current_dir=$(pwd)
+
+if [ -z "${STAGE}" ]; then
+  echo "Usage: scripts/terraform <stage> <service_name> <service_directory>"
+  exit 1
+fi
+
+if [ "$STAGE" == "prod" ]; then
+  BUCKET="rpc-prodeng-terraform-state-prod"
+elif [ "$STAGE" == "staging" ]; then
+  BUCKET="rpc-prodeng-terraform-state-staging"
+else
+  BUCKET="rpc-prodeng-terraform-state-dev"
+fi
+
+trap 'cd "$current_dir"' EXIT
+
+cd ${SERVICE_DIR}
+
+terraform init -input=false \
+  -backend-config="bucket=${BUCKET}" \
+  -backend-config="key=${SERVICE_NAME}/${STAGE}/terraform.tfstate" \
+  ./terraform
+terraform plan -input=false -var "stage=${STAGE}" -out=./terraform/terraform.plan ./terraform
+
+terraform apply -auto-approve ./terraform/terraform.plan

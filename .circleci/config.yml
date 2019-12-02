@@ -1,0 +1,199 @@
+---
+version: 2.1
+orbs:
+  aws-cli: circleci/aws-cli@0.1.13
+  docker: circleci/docker@0.5.13
+commands:
+  dockerize:
+    description: Build << parameters.image_name >> docker image
+    parameters:
+      image_name:
+        type: string
+      tag:
+        type: string
+    steps:
+      - checkout
+      - docker/check
+      - docker/build:
+          image: rpcprodengci/<< parameters.image_name >>
+          lint-dockerfile: true
+          path: docker/<< parameters.image_name >>
+          tag: << parameters.tag >>
+      - docker/push:
+          image: rpcprodengci/<< parameters.image_name >>
+          tag: << parameters.tag >>
+  terraform_deploy:
+    description: "Terraform apply << parameters.service >>"
+    parameters:
+      service:
+        type: string
+      path:
+        type: string
+      stage:
+        type: string
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/.aws
+      - run:
+          name: Terraform, I choose you!
+          command: |
+            if [[ "<< parameters.stage >>"  == "user" ]]; then export STAGE=${CIRCLE_PR_USERNAME:-$CIRCLE_USERNAME}; else export STAGE="<< parameters.stage >>"; fi
+            sh ./scripts/terraform ${STAGE} << parameters.service >> << parameters.path >>
+  terraform_destroy:
+      description: "Tear down Terraform"
+      parameters:
+        path:
+          type: string
+        stage:
+          type: string
+      steps:
+        - checkout
+        - attach_workspace:
+            at: ~/.aws
+        - run:
+            name: $ave dat money
+            when: always
+            command: |
+              if [[ "<< parameters.stage >>"  == "user" ]]; then export STAGE=${CIRCLE_PR_USERNAME:-$CIRCLE_USERNAME}; else export STAGE="<< parameters.stage >>"; fi
+              cd << parameters.path >> && terraform destroy -var "stage=${STAGE}" -auto-approve ./terraform
+jobs:
+  dockerize_terraformawscli_dev:
+    executor: docker/machine
+    steps:
+      - dockerize:
+          image_name: terraformawscli
+          tag: dev
+  dockerize_terraformawscli_prod:
+    executor: docker/machine
+    steps:
+      - dockerize:
+          image_name: terraformawscli
+          tag: latest
+  aws_auth:
+    executor: aws-cli/default
+    environment:
+      AWS_REGION: us-west-2
+    steps:
+      - checkout
+      - aws-cli/install
+      - aws-cli/configure:
+          profile-name: rpc-prodeng-dev
+          aws-access-key-id: AWS_ACCESS_KEY_ID_DEV
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY_DEV
+          aws-region: AWS_REGION
+      - aws-cli/configure:
+          profile-name: rpc-prodeng-staging
+          aws-access-key-id: AWS_ACCESS_KEY_ID_STAGE
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY_STAGE
+          aws-region: AWS_REGION
+      - aws-cli/configure:
+          profile-name: rpc-prodeng-prod
+          aws-access-key-id: AWS_ACCESS_KEY_ID_PROD
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY_PROD
+          aws-region: AWS_REGION
+      - persist_to_workspace:
+          root: ~/.aws
+          paths:
+            - "*"
+      - run:
+          command: scripts/bootstrap-terraform dev
+          environment:
+            AWS_PROFILE: rpc-prodeng-dev
+      - run:
+          command: scripts/bootstrap-terraform staging
+          environment:
+            AWS_PROFILE: rpc-prodeng-staging
+      - run:
+          command: scripts/bootstrap-terraform prod
+          environment:
+            AWS_PROFILE: rpc-prodeng-prod
+  stein_deploy_dev:
+    docker:
+      - image: rpcprodengci/terraformawscli:dev
+    environment:
+      AWS_PROFILE: rpc-prodeng-dev
+    description: "Test Stein Deploy: stage=dev"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/.aws
+      - terraform_deploy:
+          service: stein
+          path: ./osa/stein
+          stage: user
+      - terraform_destroy:
+          path: ./osa/stein
+          stage: user
+  stein_deploy_staging:
+    docker:
+      - image: rpcprodengci/terraformawscli:dev
+    environment:
+      AWS_PROFILE: rpc-prodeng-staging
+    description: "Test Stein Deploy: stage=staging"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/.aws
+      - terraform_deploy:
+          service: stein
+          path: ./osa/stein
+          stage: staging
+      - terraform_destroy:
+          path: ./osa/stein
+          stage: staging
+  stein_deploy_prod:
+    docker:
+      - image: rpcprodengci/terraformawscli:latest
+    environment:
+      AWS_PROFILE: rpc-prodeng-prod
+    description: "Test Stein Deploy: stage=prod"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/.aws
+      - terraform_deploy:
+          service: stein
+          path: ./osa/stein
+          stage: prod
+      - terraform_destroy:
+          path: ./osa/stein
+          stage: prod
+workflows:
+  version: 2
+  osa_validation:
+    jobs:
+      - aws_auth
+#      - dockerize_terraformawscli_dev:
+#          filters:
+#            branches:
+#              ignore:
+#                - master
+      - dockerize_terraformawscli_prod:
+          filters:
+            branches:
+              only:
+                - master
+      - stein_deploy_dev:
+          requires:
+            - aws_auth
+#            - dockerize_terraformawscli_dev
+          filters:
+            branches:
+              ignore:
+                - master
+      - stein_deploy_staging:
+          requires:
+            - stein_deploy_dev
+          filters:
+            branches:
+              ignore:
+                - master
+      - stein_deploy_prod:
+          requires:
+            - dockerize_terraformawscli_prod
+            - aws_auth
+          filters:
+            branches:
+              only:
+                - master
